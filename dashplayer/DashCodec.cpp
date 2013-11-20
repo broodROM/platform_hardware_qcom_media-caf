@@ -377,7 +377,12 @@ DashCodec::DashCodec()
       mEncoderDelay(0),
       mEncoderPadding(0),
       mChannelMaskPresent(false),
+#ifdef NO_ADAPTIVE_PLAYBACK
+      mChannelMask(0),
+      mSmoothStreaming(false) {
+#else
       mChannelMask(0){
+#endif
     mUninitializedState = new UninitializedState(this);
     mLoadedState = new LoadedState(this);
     mLoadedToIdleState = new LoadedToIdleState(this);
@@ -615,6 +620,13 @@ status_t DashCodec::allocateOutputBuffersFromNativeWindow() {
     if (def.nBufferCountActual < def.nBufferCountMin + minUndequeuedBufs) {
         OMX_U32 newBufferCount = def.nBufferCountMin + minUndequeuedBufs;
         def.nBufferCountActual = newBufferCount;
+
+#ifdef NO_ADAPTIVE_PLAYBACK
+        //Keep an extra buffer for smooth streaming
+        if (mSmoothStreaming) {
+            def.nBufferCountActual += 1;
+        }
+#endif
 
         err = mOMX->setParameter(
                 mNode, OMX_IndexParamPortDefinition, &def, sizeof(def));
@@ -953,6 +965,9 @@ status_t DashCodec::configureCodec(
         }
     }
 
+#ifdef NO_ADAPTIVE_PLAYBACK
+    if (!strncasecmp(mime, "video/", 6)) {
+#else
     // Always try to enable dynamic output buffers on native surface
     int32_t video = !strncasecmp(mime, "video/", 6);
     sp<RefBase> obj;
@@ -1012,6 +1027,7 @@ status_t DashCodec::configureCodec(
     }
 
     if (video) {
+#endif
         if (encoder) {
             err = setupVideoEncoder(mime, msg);
         } else {
@@ -1020,6 +1036,13 @@ status_t DashCodec::configureCodec(
                     || !msg->findInt32("height", &height)) {
                 err = INVALID_OPERATION;
             } else {
+#ifdef NO_ADAPTIVE_PLAYBACK
+                //override height & width with max for smooth streaming
+                if (mSmoothStreaming) {
+                    width = MAX_WIDTH;
+                    height = MAX_HEIGHT;
+                }
+#endif
                 err = setupVideoDecoder(mime, width, height);
             }
         }
@@ -2351,6 +2374,20 @@ void DashCodec::sendFormatChange() {
     mSentFormat = true;
 }
 
+#ifdef NO_ADAPTIVE_PLAYBACK
+status_t DashCodec::InitSmoothStreaming() {
+     status_t err = mOMX->setParameter(mNode, (OMX_INDEXTYPE)OMX_QcomIndexParamEnableSmoothStreaming,&err, sizeof(int32_t));
+    if (err != OMX_ErrorNone) {
+        ALOGE("InitSmoothStreaming setParam failed for extradata");
+        return err;
+    }
+
+    ALOGW("InitSmoothStreaming - Smooth streaming mode enabled");
+
+    return OK;
+}
+#endif
+
 void DashCodec::signalError(OMX_ERRORTYPE error, status_t internalError) {
     sp<AMessage> notify = mNotify->dup();
     notify->setInt32("what", DashCodec::kWhatError);
@@ -2989,7 +3026,11 @@ bool DashCodec::BaseState::onOMXFillBufferDone(
                 break;
             }
 
+#ifdef NO_ADAPTIVE_PLAYBACK
+            if (!mCodec->mIsEncoder && !mCodec->mSentFormat && !mCodec->mSmoothStreaming) {
+#else
             if (!mCodec->mIsEncoder && !mCodec->mSentFormat) {
+#endif
                 mCodec->sendFormatChange();
             }
 
@@ -3015,6 +3056,14 @@ bool DashCodec::BaseState::onOMXFillBufferDone(
             notify->setInt32("flags", flags);
             sp<AMessage> reply =
                 new AMessage(kWhatOutputBufferDrained, mCodec->id());
+
+#ifdef NO_ADAPTIVE_PLAYBACK
+           if (!mCodec->mPostFormat && mCodec->mSmoothStreaming){
+                   ALOGV("Resolution will change from this buffer, set a flag");
+                   reply->setInt32("resChange", 1);
+                   mCodec->mPostFormat = true;
+            }
+#endif
 
             reply->setPointer("buffer-id", info->mBufferID);
 
@@ -3048,6 +3097,16 @@ void DashCodec::BaseState::onOutputBufferDrained(const sp<AMessage> &msg) {
     BufferInfo *info =
         mCodec->findBufferByID(kPortIndexOutput, bufferID, &index);
     CHECK_EQ((int)info->mStatus, (int)BufferInfo::OWNED_BY_DOWNSTREAM);
+#ifdef NO_ADAPTIVE_PLAYBACK
+    if (mCodec->mSmoothStreaming) {
+        int32_t resChange = 0;
+        if (msg->findInt32("resChange", &resChange) && resChange == 1) {
+            ALOGV("Resolution change is sent to native window now ");
+            mCodec->sendFormatChange();
+            msg->setInt32("resChange", 0);
+        }
+    }
+#endif
     int32_t render;
     if (mCodec->mNativeWindow != NULL
             && msg->findInt32("render", &render) && render != 0) {
@@ -3362,6 +3421,27 @@ bool DashCodec::LoadedState::onConfigureComponent(
     CHECK(mCodec->mNode != NULL);
 
     int32_t value;
+
+#ifdef NO_ADAPTIVE_PLAYBACK
+    if (msg->findInt32("smooth-streaming", &value) && (value == 1) &&
+       !strcmp("OMX.qcom.video.decoder.avc", mCodec->mComponentName.c_str())) {
+        char value_ss[PROPERTY_VALUE_MAX];
+        if (property_get("hls.disable.smooth.streaming", value_ss, NULL) &&
+           (!strcasecmp(value_ss, "true") || !strcmp(value_ss, "1"))) {
+
+            ALOGW("Dont enable Smooth streaming, disable property is set");
+        } else {
+            mCodec->mSmoothStreaming = true;
+            status_t err = mCodec->InitSmoothStreaming();
+            if (err != OK) {
+                ALOGE("Error in enabling smooth streaming, ignore & disable ");
+                mCodec->mSmoothStreaming = false;
+            } else {
+                ALOGI("Smooth streaming is enabled ");
+            }
+        }
+    }
+#endif
 
     if (msg->findInt32("secure-op", &value) && (value == 1)) {
         mCodec->mFlags |= kFlagIsSecureOPOnly;
