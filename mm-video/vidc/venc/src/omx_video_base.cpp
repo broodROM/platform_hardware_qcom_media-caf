@@ -76,9 +76,11 @@ ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define VC1_STRUCT_B_POS            24
 #define VC1_SEQ_LAYER_SIZE          36
 
+#ifndef MAX_RES_720P
 #define IS_NOT_ALIGNED( num, to) (num & (to-1))
 #define ALIGN( num, to ) (((num) + (to-1)) & (~(to-1)))
 #define SZ_2K (2048)
+#endif
 
 typedef struct OMXComponentCapabilityFlagsType
 {
@@ -3576,6 +3578,7 @@ OMX_ERRORTYPE  omx_video::empty_this_buffer_proxy(OMX_IN OMX_HANDLETYPE         
     memcpy (pmem_data_buf, (buffer->pBuffer + buffer->nOffset),
             buffer->nFilledLen);
     DEBUG_PRINT_LOW("memcpy() done in ETBProxy for i/p Heap UseBuf");
+#ifndef MAX_RES_720P
   } else if (m_sInPortDef.format.video.eColorFormat ==
       OMX_COLOR_FormatYUV420SemiPlanar) {
       //For the case where YUV420SP buffers are qeueued to component
@@ -3598,6 +3601,7 @@ OMX_ERRORTYPE  omx_video::empty_this_buffer_proxy(OMX_IN OMX_HANDLETYPE         
                     chromaOffset+chromaSize);
           }
       }
+#endif
   }
 #ifdef _COPPER_
   if(dev_empty_buf(buffer, pmem_data_buf,nBufIndex,m_pInput_pmem[nBufIndex].fd) != true)
@@ -4475,9 +4479,12 @@ int omx_video::alloc_map_ion_memory(int size,struct ion_allocation_data *alloc_d
         if (secure_session)
            alloc_data->heap_mask = (ION_HEAP(MEM_HEAP_ID) | ION_SECURE);
         else
+#ifdef MAX_RES_720P
+           alloc_data->heap_mask = ION_HEAP(MEM_HEAP_ID);
+#else
            alloc_data->heap_mask = (ION_HEAP(MEM_HEAP_ID) |
                 ION_HEAP(ION_IOMMU_HEAP_ID));
-
+#endif
         pthread_mutex_lock(&m_venc_ionlock);
         rc = ioctl(ion_device_fd,ION_IOC_ALLOC,alloc_data);
         if(rc || !alloc_data->handle) {
